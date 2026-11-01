@@ -1,0 +1,296 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "CarLauncher"
+          include(":app")
+          EOF_FILE
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.launcher"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.launcher"
+                  minSdk = 21
+                  targetSdk = 28   // مناسب لشاشات السيارات القديمة
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <application
+                  android:label="لانشر السيارة"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden|locale|layoutDirection">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/launcher/MainActivity.kt)
+          cat > app/src/main/java/com/example/launcher/MainActivity.kt <<'EOF_FILE'
+          package com.example.launcher
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.*
+          import android.graphics.*
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import java.io.File
+          import java.util.Calendar
+          import kotlin.math.cos
+          import kotlin.math.sin
+
+          class MainActivity : Activity() {
+
+              data class Tile(val id: String, val name: String, val icon: Int, val dock: Boolean = false)
+
+              private val tiles = listOf(
+                  Tile("video", "فيديو", android.R.drawable.ic_media_play),
+                  Tile("car", "إعدادات السيارة", android.R.drawable.ic_menu_manage),
+                  Tile("bt", "بلوتوث", android.R.drawable.ic_menu_call),
+                  Tile("link", "PhoneLink", android.R.drawable.ic_menu_share),
+                  Tile("radio", "الإذاعة", android.R.drawable.ic_lock_silent_mode_off),
+                  Tile("music", "موسيقي", android.R.drawable.ic_media_ff)
+              )
+              private val dock = listOf(
+                  Tile("d_settings", "", android.R.drawable.ic_menu_preferences, true),
+                  Tile("d_apps", "", android.R.drawable.ic_menu_sort_by_size, true),
+                  Tile("d_nav", "", android.R.drawable.ic_menu_compass, true)
+              )
+              private lateinit var prefs: SharedPreferences
+              private lateinit var root: FrameLayout
+              private var pending: Tile? = null
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  prefs = getSharedPreferences("launcher", MODE_PRIVATE)
+                  root = FrameLayout(this)
+                  setContentView(root)
+                  build()
+              }
+
+              // ---------- بناء الواجهة ----------
+              private fun build() {
+                  root.removeAllViews()
+                  root.setBackgroundColor(Color.parseColor("#04060F"))
+
+                  val main = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+                  val grid = GridLayout(this).apply { columnCount = 3 }
+                  tiles.forEach { grid.addView(tileView(it), GridLayout.LayoutParams().apply {
+                      setMargins(dp(18), dp(10), dp(18), dp(10)) }) }
+                  main.addView(grid, LinearLayout.LayoutParams(0, -2, 1f))
+
+                  val clockBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+                  clockBox.addView(ClockView(this), LinearLayout.LayoutParams(dp(170), dp(170)))
+                  listOf("yyyy/MM/dd", "EEEE").forEach { f ->
+                      clockBox.addView(TextClock(this).apply {
+                          format12Hour = f; format24Hour = f; setTextColor(Color.WHITE); textSize = 16f; gravity = Gravity.CENTER })
+                  }
+                  main.addView(clockBox, LinearLayout.LayoutParams(dp(220), -2))
+                  root.addView(main, FrameLayout.LayoutParams(-1, -1).apply { bottomMargin = dp(80) })
+
+                  // شريط الوقت العلوي
+                  root.addView(TextClock(this).apply {
+                      format12Hour = "h:mm a"; setTextColor(Color.WHITE); textSize = 16f
+                  }, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { setMargins(dp(24), dp(12), 0, 0) })
+
+                  // الشريط السفلي
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(40), 0, dp(40), 0)
+                      background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          intArrayOf(Color.parseColor("#3A3E49"), Color.parseColor("#20232B")))
+                  }
+                  dock.forEachIndexed { i, t ->
+                      if (i > 0) bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                      bar.addView(tileView(t))
+                  }
+                  root.addView(bar, FrameLayout.LayoutParams(-1, dp(76), Gravity.BOTTOM))
+              }
+
+              private fun tileView(t: Tile): View {
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+                  val size = if (t.dock) dp(56) else dp(88)
+
+                  val ring = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                      intArrayOf(Color.parseColor("#6B6F7A"), Color.parseColor("#14161D"))).apply {
+                      shape = GradientDrawable.OVAL; setStroke(dp(3), Color.parseColor("#D9DDE6")) }
+                  val img = ImageView(this).apply {
+                      val f = File(filesDir, "icon_${t.id}.png")
+                      if (f.exists()) { setImageBitmap(BitmapFactory.decodeFile(f.path)); scaleType = ImageView.ScaleType.CENTER_CROP }
+                      else { setImageResource(t.icon); setColorFilter(Color.WHITE); setPadding(dp(18), dp(18), dp(18), dp(18)) }
+                      clipToOutline = true
+                      outlineProvider = object : android.view.ViewOutlineProvider() {
+                          override fun getOutline(v: View, o: android.graphics.Outline) { o.setOval(0, 0, v.width, v.height) } }
+                  }
+                  val frame = FrameLayout(this).apply { background = ring; addView(img, FrameLayout.LayoutParams(-1, -1)) }
+                  col.addView(frame, LinearLayout.LayoutParams(size, size))
+
+                  if (!t.dock) col.addView(TextView(this).apply {
+                      text = prefs.getString("name_${t.id}", t.name); setTextColor(Color.WHITE); textSize = 15f
+                      gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+
+                  col.setOnClickListener { launch(t) }
+                  col.setOnLongClickListener { editDialog(t); true }
+                  return col
+              }
+
+              // ---------- تشغيل التطبيقات ----------
+              private fun launch(t: Tile) {
+                  val pkg = prefs.getString("pkg_${t.id}", null)
+                  if (pkg != null) {
+                      packageManager.getLaunchIntentForPackage(pkg)?.let { startActivity(it); return }
+                  }
+                  when (t.id) {
+                      "d_settings" -> startActivity(Intent(Settings.ACTION_SETTINGS))
+                      "d_apps" -> appPicker { p -> packageManager.getLaunchIntentForPackage(p)?.let { startActivity(it) } }
+                      "d_nav" -> runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q="))) }
+                      "bt" -> startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                      else -> Toast.makeText(this, "اضغط مطولاً لتعيين تطبيق", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun appPicker(onPick: (String) -> Unit) {
+                  val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val apps = packageManager.queryIntentActivities(i, 0)
+                      .sortedBy { it.loadLabel(packageManager).toString() }
+                  AlertDialog.Builder(this)
+                      .setItems(apps.map { it.loadLabel(packageManager).toString() }.toTypedArray()) { _, w ->
+                          onPick(apps[w].activityInfo.packageName) }
+                      .show()
+              }
+
+              // ---------- التعديل ----------
+              private fun editDialog(t: Tile) {
+                  val items = if (t.dock) arrayOf("تغيير الصورة", "تعيين تطبيق", "إعادة الافتراضي")
+                  else arrayOf("تغيير الاسم", "تغيير الصورة", "تعيين تطبيق", "إعادة الافتراضي")
+                  AlertDialog.Builder(this).setItems(items) { _, w ->
+                      when (items[w]) {
+                          "تغيير الاسم" -> {
+                              val et = EditText(this).apply { setText(prefs.getString("name_${t.id}", t.name)) }
+                              AlertDialog.Builder(this).setView(et).setPositiveButton("حفظ") { _, _ ->
+                                  prefs.edit().putString("name_${t.id}", et.text.toString()).apply(); build() }.show()
+                          }
+                          "تغيير الصورة" -> {
+                              pending = t
+                              startActivityForResult(Intent(Intent.ACTION_GET_CONTENT).setType("image/*"), 1)
+                          }
+                          "تعيين تطبيق" -> appPicker { p -> prefs.edit().putString("pkg_${t.id}", p).apply() }
+                          else -> {
+                              File(filesDir, "icon_${t.id}.png").delete()
+                              prefs.edit().remove("name_${t.id}").remove("pkg_${t.id}").apply(); build()
+                          }
+                      }
+                  }.show()
+              }
+
+              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+                  super.onActivityResult(req, res, data)
+                  val t = pending ?: return
+                  val uri = data?.data ?: return
+                  if (req != 1 || res != RESULT_OK) return
+                  contentResolver.openInputStream(uri)?.use { s ->
+                      val src = BitmapFactory.decodeStream(s) ?: return
+                      val m = minOf(src.width, src.height)
+                      val sq = Bitmap.createBitmap(src, (src.width - m) / 2, (src.height - m) / 2, m, m)
+                      val out = Bitmap.createScaledBitmap(sq, 256, 256, true)
+                      File(filesDir, "icon_${t.id}.png").outputStream().use { out.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                  }
+                  build()
+              }
+
+              override fun onBackPressed() { /* اللانشر لا يُغلق */ }
+
+              // ---------- الساعة التناظرية ----------
+              class ClockView(c: Context) : View(c) {
+                  private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
+                  override fun onDraw(cv: Canvas) {
+                      val cx = width / 2f; val r = width / 2f - 6
+                      for (i in 0 until 60) {
+                          val a = Math.toRadians(i * 6.0); val big = i % 5 == 0
+                          p.strokeWidth = if (big) 6f else 2f
+                          val r1 = if (big) r * 0.9f else r * 0.95f
+                          cv.drawLine(cx + sin(a).toFloat() * r1, cx - cos(a).toFloat() * r1,
+                              cx + sin(a).toFloat() * r, cx - cos(a).toFloat() * r, p)
+                      }
+                      p.textSize = r * 0.2f; p.textAlign = Paint.Align.CENTER; p.style = Paint.Style.FILL
+                      cv.drawText("12", cx, cx - r * 0.65f + p.textSize / 3, p)
+                      cv.drawText("6", cx, cx + r * 0.65f + p.textSize / 3, p)
+                      cv.drawText("3", cx + r * 0.7f, cx + p.textSize / 3, p)
+                      cv.drawText("9", cx - r * 0.7f, cx + p.textSize / 3, p)
+                      val c = Calendar.getInstance()
+                      val m = c.get(Calendar.MINUTE); val h = c.get(Calendar.HOUR) + m / 60.0
+                      hand(cv, cx, h * 30, r * 0.5f, 10f); hand(cv, cx, m * 6.0, r * 0.75f, 6f)
+                      cv.drawCircle(cx, cx, 10f, p)
+                      postInvalidateDelayed(10000)
+                  }
+                  private fun hand(cv: Canvas, cx: Float, deg: Double, len: Float, w: Float) {
+                      p.strokeWidth = w; val a = Math.toRadians(deg)
+                      cv.drawLine(cx, cx, cx + sin(a).toFloat() * len, cx - cos(a).toFloat() * len, p)
+                  }
+              }
+          }
+          EOF_FILE
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CarLauncher-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
